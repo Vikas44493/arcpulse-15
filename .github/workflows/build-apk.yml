@@ -1,0 +1,435 @@
+name: Build OnePlus 15 Camera LED APK (Burn-In Protected)
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Generate OnePlus 15 ArcPulse Project with Burn-In Protection
+        run: |
+          mkdir -p app/src/main/java/com/oneplus15/arcpulse
+
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ArcPulse15"
+          include(":app")
+          EOF
+
+          cat << 'EOF' > build.gradle.kts
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+
+          cat << 'EOF' > app/build.gradle.kts
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.oneplus15.arcpulse"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.oneplus15.arcpulse"
+                  minSdk = 29
+                  targetSdk = 34
+                  versionCode = 2
+                  versionName = "1.1-BurnInGuard"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+              <application
+                  android:label="ArcPulse 15"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".LedNotificationService"
+                      android:label="ArcPulse 15 Camera Hole LED"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService" />
+                      </intent-filter>
+                  </service>
+                  <service
+                      android:name=".CameraRingOverlayService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse" />
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/oneplus15/arcpulse/LedNotificationService.kt
+          package com.oneplus15.arcpulse
+
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.os.Build
+          import android.service.notification.NotificationListenerService
+          import android.service.notification.StatusBarNotification
+
+          object LedConfigStore {
+              const val PREFS = "arcpulse15_prefs"
+              val defaultColors = mapOf(
+                  "com.whatsapp" to "#25D366",
+                  "com.instagram.android" to "#FF0069",
+                  "com.google.android.gm" to "#EA4335",
+                  "org.telegram.messenger" to "#24A1DE",
+                  "com.google.android.dialer" to "#F50514",
+                  "com.google.android.apps.messaging" to "#3B82F6",
+                  "com.Slack" to "#A855F7",
+                  "com.discord" to "#5865F2",
+                  "com.snapchat.android" to "#FFFC00"
+              )
+
+              fun getColorForPackage(ctx: Context, pkg: String): Int? {
+                  val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                  if (!prefs.getBoolean("${pkg}_enabled", true)) return null
+                  val hex = prefs.getString("${pkg}_color", defaultColors[pkg]) ?: return null
+                  return runCatching { Color.parseColor(hex) }.getOrNull()
+              }
+          }
+
+          class LedNotificationService : NotificationListenerService() {
+              override fun onNotificationPosted(sbn: StatusBarNotification) {
+                  if (sbn.isOngoing) return
+                  val color = LedConfigStore.getColorForPackage(this, sbn.packageName) ?: return
+                  val intent = Intent(this, CameraRingOverlayService::class.java).apply {
+                      action = "SHOW_LED"
+                      putExtra("PKG", sbn.packageName)
+                      putExtra("COLOR", color)
+                  }
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
+                  else startService(intent)
+              }
+
+              override fun onNotificationRemoved(sbn: StatusBarNotification) {
+                  val intent = Intent(this, CameraRingOverlayService::class.java).apply {
+                      action = "DISMISS_LED"
+                      putExtra("PKG", sbn.packageName)
+                  }
+                  startService(intent)
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/oneplus15/arcpulse/CameraRingOverlayService.kt
+          package com.oneplus15.arcpulse
+
+          import android.animation.ValueAnimator
+          import android.app.*
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.*
+          import android.hardware.*
+          import android.hardware.display.DisplayManager
+          import android.os.*
+          import android.view.*
+          import android.view.animation.LinearInterpolator
+          import kotlin.math.cos
+          import kotlin.math.sin
+
+          class CameraRingOverlayService : Service(), SensorEventListener {
+              private lateinit var wm: WindowManager
+              private lateinit var dm: DisplayManager
+              private var sm: SensorManager? = null
+              private var wakeLock: PowerManager.WakeLock? = null
+              private var ringView: RingView? = null
+              private val activeColors = LinkedHashMap<String, Int>()
+
+              private var pocketCovered = false
+              private var ambientLux = 50f
+              private var alertStartTimeMs = 0L
+              private var manualShiftTestOffset = 0.0
+
+              private val timeoutHandler = Handler(Looper.getMainLooper())
+              private val cutoffRunnable = Runnable { removeOverlay() }
+
+              override fun onCreate() {
+                  super.onCreate()
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val ch = NotificationChannel("led_ch", "Camera LED", NotificationManager.IMPORTANCE_LOW)
+                      getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
+                      startForeground(1, Notification.Builder(this, "led_ch")
+                          .setContentTitle("ArcPulse 15 Active (Burn-In Guard On)")
+                          .setSmallIcon(android.R.drawable.ic_dialog_info).build())
+                  }
+                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                  dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+                  sm = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+
+                  // Register Proximity Sensor (Pocket Cutoff) & Ambient Light Sensor (1-Nit Night Dimming)
+                  sm?.getDefaultSensor(Sensor.TYPE_PROXIMITY)?.let {
+                      sm?.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
+                  }
+                  sm?.getDefaultSensor(Sensor.TYPE_LIGHT)?.let {
+                      sm?.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
+                  }
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  val prefs = getSharedPreferences(LedConfigStore.PREFS, Context.MODE_PRIVATE)
+                  when (intent?.action) {
+                      "SHOW_LED" -> {
+                          val pkg = intent.getStringExtra("PKG") ?: "test"
+                          val color = intent.getIntExtra("COLOR", Color.GREEN)
+                          activeColors[pkg] = color
+                          alertStartTimeMs = System.currentTimeMillis()
+
+                          // Schedule hard burn-in auto-cutoff timeout (default 15 mins)
+                          val maxMinutes = prefs.getFloat("timeout_min", 15f).toLong().coerceAtLeast(1L)
+                          timeoutHandler.removeCallbacks(cutoffRunnable)
+                          timeoutHandler.postDelayed(cutoffRunnable, maxMinutes * 60 * 1000L)
+
+                          wakeForScreenOff(maxMinutes)
+                          showOverlay()
+                      }
+                      "TEST_SHIFT" -> {
+                          manualShiftTestOffset += 1.9
+                          ringView?.invalidate()
+                      }
+                      "DISMISS_LED" -> {
+                          val pkg = intent.getStringExtra("PKG")
+                          if (pkg != null) activeColors.remove(pkg) else activeColors.clear()
+                          if (activeColors.isEmpty()) removeOverlay() else ringView?.invalidate()
+                      }
+                      "REFRESH" -> ringView?.invalidate()
+                  }
+                  return START_STICKY
+              }
+
+              private fun isScreenOff(): Boolean =
+                  dm.getDisplay(Display.DEFAULT_DISPLAY)?.state != Display.STATE_ON
+
+              private fun wakeForScreenOff(maxMinutes: Long) {
+                  if (isScreenOff()) {
+                      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                      if (wakeLock == null) {
+                          @Suppress("DEPRECATION")
+                          wakeLock = pm.newWakeLock(
+                              PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                              "ArcPulse15:BurnInSafeWake"
+                          )
+                      }
+                      if (wakeLock?.isHeld == false) {
+                          wakeLock?.acquire(maxMinutes * 60 * 1000L)
+                      }
+                  }
+              }
+
+              private fun showOverlay() {
+                  if (ringView == null) {
+                      val lp = WindowManager.LayoutParams(
+                          WindowManager.LayoutParams.MATCH_PARENT,
+                          260,
+                          WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                                  WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                                  WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                                  WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                                  WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                                  WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+                          PixelFormat.TRANSLUCENT
+                      ).apply {
+                          gravity = Gravity.TOP or Gravity.START
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                              layoutInDisplayCutoutMode =
+                                  WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                          }
+                          if (isScreenOff()) {
+                              screenBrightness = 0.01f // 1-nit minimum power state on OnePlus 15
+                          }
+                      }
+                      ringView = RingView(this)
+                      wm.addView(ringView, lp)
+                  }
+                  ringView?.invalidate()
+              }
+
+              private fun removeOverlay() {
+                  timeoutHandler.removeCallbacks(cutoffRunnable)
+                  ringView?.stopAnim()
+                  ringView?.let { wm.removeView(it); ringView = null }
+                  if (wakeLock?.isHeld == true) wakeLock?.release()
+              }
+
+              override fun onSensorChanged(e: SensorEvent?) {
+                  when (e?.sensor?.type) {
+                      Sensor.TYPE_PROXIMITY -> {
+                          pocketCovered = e.values[0] < e.sensor.maximumRange
+                          ringView?.visibility = if (pocketCovered) View.INVISIBLE else View.VISIBLE
+                      }
+                      Sensor.TYPE_LIGHT -> {
+                          ambientLux = e.values[0]
+                      }
+                  }
+              }
+
+              override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+              override fun onBind(i: Intent?): IBinder? = null
+
+              inner class RingView(ctx: Context) : View(ctx) {
+                  private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                      style = Paint.Style.STROKE
+                      strokeCap = Paint.Cap.ROUND
+                      maskFilter = BlurMaskFilter(14f, BlurMaskFilter.Blur.NORMAL)
+                  }
+                  private var angle = 0f
+                  private val anim = ValueAnimator.ofFloat(0f, 360f).apply {
+                      duration = 1800L
+                      repeatCount = ValueAnimator.INFINITE
+                      interpolator = LinearInterpolator()
+                      addUpdateListener { angle = it.animatedValue as Float; invalidate() }
+                      start()
+                  }
+                  fun stopAnim() = anim.cancel()
+
+                  override fun onDraw(c: Canvas) {
+                      super.onDraw(c)
+                      if (activeColors.isEmpty()) return
+
+                      val prefs = context.getSharedPreferences(LedConfigStore.PREFS, Context.MODE_PRIVATE)
+                      val nowMs = System.currentTimeMillis()
+
+                      // STAGE 3 BURN-IN GUARD: Thermal Duty-Cycle Blackout (20s ON, 4s OFF cooldown)
+                      val dutyCycleEnabled = prefs.getBoolean("burnin_duty_cycle", true)
+                      if (dutyCycleEnabled) {
+                          val cyclePosMs = (nowMs - alertStartTimeMs) % 24000L
+                          if (cyclePosMs in 20000L..24000L) {
+                              return // Complete AMOLED pixel rest window
+                          }
+                      }
+
+                      // STAGE 1 BURN-IN GUARD: 2D Non-Repeating Lissajous Sub-Pixel Shift (ωx = 1.0, ωy = 1.618)
+                      val shiftAmp = prefs.getFloat("burnin_shift_px", 2.0f)
+                      val stepRad = (nowMs / 30000.0) + manualShiftTestOffset
+                      val shiftX = (cos(stepRad) * shiftAmp).toFloat()
+                      val shiftY = (sin(stepRad * 1.6180339) * shiftAmp).toFloat()
+
+                      // STAGE 2 BURN-IN GUARD: Radial Edge Breathing (±1.5px over 45s)
+                      val radialBreathe = (sin(nowMs / 7162.0) * 1.5).toFloat()
+
+                      val cx = prefs.getFloat("cx", 636f) + shiftX
+                      val cy = prefs.getFloat("cy", 76f) + shiftY
+                      val r = (prefs.getFloat("r", 34f) + radialBreathe).coerceAtLeast(18f)
+                      paint.strokeWidth = prefs.getFloat("sw", 6f)
+
+                      // STAGE 4 BURN-IN GUARD: Ambient Light Auto-Dim + 5-Minute Progressive Decay
+                      val elapsedMin = (nowMs - alertStartTimeMs) / 60000f
+                      val decayFactor = if (elapsedMin > 5f) 0.5f else 1.0f
+                      val darkRoomFactor = if (ambientLux < 5f) 0.45f else 1.0f
+                      val targetAlpha = (255 * decayFactor * darkRoomFactor).toInt().coerceIn(45, 255)
+
+                      val rect = RectF(cx - r, cy - r, cx + r, cy + r)
+                      val list = activeColors.values.toList()
+                      val sweep = (360f / list.size) - 18f
+
+                      list.forEachIndexed { idx, col ->
+                          paint.color = col
+                          paint.alpha = targetAlpha
+                          c.drawArc(rect, angle + idx * (360f / list.size), sweep, false, paint)
+                      }
+                  }
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/oneplus15/arcpulse/MainActivity.kt
+          package com.oneplus15.arcpulse
+
+          import android.app.Activity
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.*
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val prefs = getSharedPreferences(LedConfigStore.PREFS, Context.MODE_PRIVATE)
+                  val scroll = ScrollView(this).apply { setBackgroundColor(Color.parseColor("#090A0F")) }
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(48, 64, 48, 64)
+                  }
+                  scroll.addView(root)
+
+                  val title = TextView(this).apply {
+                      text = "ArcPulse 15 — Camera LED + Burn-In Guard"
+                      textSize = 20f
+                      setTextColor(Color.WHITE)
+                  }
+                  root.addView(title)
+
+                  val btnNotif = Button(this).apply {
+                      text = "1. Grant Notification Access"
+                      setOnClickListener { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+                  }
+                  root.addView(btnNotif)
+
+                  val btnOverlay = Button(this).apply {
+                      text = "2. Grant Overlay / Lock Screen Permission"
+                      setOnClickListener {
+                          startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$pa
